@@ -30,6 +30,9 @@ const PIECES = [
 
 const LINE_SCORES = [0, 100, 300, 500, 800];
 
+const HS_KEY = 'tetris-highscores';
+const STATS_KEY = 'tetris-best-stats';
+
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
@@ -41,8 +44,118 @@ const overlay = document.getElementById('overlay');
 const overlayTitle = document.getElementById('overlay-title');
 const overlayScore = document.getElementById('overlay-score');
 const restartBtn = document.getElementById('restart-btn');
+const overlayHs = document.getElementById('overlay-hs');
+const nameInputWrap = document.getElementById('name-input-wrap');
+const nameInput = document.getElementById('name-input');
+const nameSaveBtn = document.getElementById('name-save-btn');
+const resetHsBtn = document.getElementById('reset-hs-btn');
+const sideHsList = document.getElementById('hs-list');
+const sideBestCombo = document.getElementById('best-combo');
+const sideBestLines = document.getElementById('best-lines');
 
 let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
+let sessionBestCombo = 0;
+let pendingNewEntry = null;
+
+function loadHighscores() {
+  try {
+    return JSON.parse(localStorage.getItem(HS_KEY)) || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function loadBestStats() {
+  try {
+    return JSON.parse(localStorage.getItem(STATS_KEY)) || { bestCombo: 0, bestLines: 0 };
+  } catch (e) {
+    return { bestCombo: 0, bestLines: 0 };
+  }
+}
+
+function saveHighscores(hs) {
+  localStorage.setItem(HS_KEY, JSON.stringify(hs));
+}
+
+function saveBestStats(stats) {
+  localStorage.setItem(STATS_KEY, JSON.stringify(stats));
+}
+
+function isTopFive(s) {
+  const hs = loadHighscores();
+  return hs.length < 5 || s >= hs[hs.length - 1].score;
+}
+
+function insertScore(name, s, l, combo) {
+  const hs = loadHighscores();
+  hs.push({ name, score: s, lines: l, combo });
+  hs.sort((a, b) => b.score - a.score);
+  const insertedIdx = hs.findIndex(e => e.name === name && e.score === s && e.lines === l && e.combo === combo);
+  hs.splice(5);
+  saveHighscores(hs);
+  return insertedIdx < 5 ? insertedIdx : -1;
+}
+
+function renderSideHighscores() {
+  const hs = loadHighscores();
+  const stats = loadBestStats();
+  sideBestCombo.textContent = stats.bestCombo;
+  sideBestLines.textContent = stats.bestLines;
+  sideHsList.innerHTML = '';
+  if (hs.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'hs-empty';
+    li.textContent = '— sin records —';
+    sideHsList.appendChild(li);
+    return;
+  }
+  hs.forEach((entry, i) => {
+    const li = document.createElement('li');
+    const rank = document.createElement('span');
+    rank.className = 'hs-rank';
+    rank.textContent = `${i + 1}.`;
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'hs-name';
+    nameSpan.textContent = entry.name;
+    const scoreSpan = document.createElement('span');
+    scoreSpan.className = 'hs-score';
+    scoreSpan.textContent = entry.score.toLocaleString();
+    li.appendChild(rank);
+    li.appendChild(nameSpan);
+    li.appendChild(scoreSpan);
+    sideHsList.appendChild(li);
+  });
+}
+
+function renderOverlayHighscores(highlightIdx) {
+  const hs = loadHighscores();
+  overlayHs.innerHTML = '';
+  if (hs.length === 0) return;
+  const table = document.createElement('table');
+  table.className = 'hs-table';
+  hs.forEach((entry, i) => {
+    const tr = document.createElement('tr');
+    if (i === highlightIdx) tr.className = 'hs-new';
+    const tdRank = document.createElement('td');
+    tdRank.className = 'hs-rank';
+    tdRank.textContent = `${i + 1}.`;
+    const tdName = document.createElement('td');
+    tdName.className = 'hs-name';
+    tdName.textContent = entry.name;
+    const tdScore = document.createElement('td');
+    tdScore.className = 'hs-score';
+    tdScore.textContent = entry.score.toLocaleString();
+    const tdLines = document.createElement('td');
+    tdLines.className = 'hs-lines';
+    tdLines.textContent = `${entry.lines}L`;
+    tr.appendChild(tdRank);
+    tr.appendChild(tdName);
+    tr.appendChild(tdScore);
+    tr.appendChild(tdLines);
+    table.appendChild(tr);
+  });
+  overlayHs.appendChild(table);
+}
 
 function createBoard() {
   return Array.from({ length: ROWS }, () => new Array(COLS).fill(0));
@@ -110,6 +223,7 @@ function clearLines() {
     score += (LINE_SCORES[cleared] || 0) * level;
     level = Math.floor(lines / 10) + 1;
     dropInterval = Math.max(100, 1000 - (level - 1) * 90);
+    sessionBestCombo = Math.max(sessionBestCombo, cleared);
     updateHUD();
   }
 }
@@ -220,13 +334,73 @@ function drawNext() {
       drawBlock(nextCtx, offX + c, offY + r, shape[r][c], NB);
 }
 
+function updateBestStats() {
+  const stats = loadBestStats();
+  let changed = false;
+  if (sessionBestCombo > stats.bestCombo) {
+    stats.bestCombo = sessionBestCombo;
+    changed = true;
+  }
+  if (lines > stats.bestLines) {
+    stats.bestLines = lines;
+    changed = true;
+  }
+  if (changed) saveBestStats(stats);
+  return stats;
+}
+
 function endGame() {
   gameOver = true;
   cancelAnimationFrame(animId);
   overlayTitle.textContent = 'GAME OVER';
   overlayScore.textContent = `Puntuación: ${score.toLocaleString()}`;
+
+  updateBestStats();
+  renderSideHighscores();
+
+  overlayHs.innerHTML = '';
+  nameInputWrap.classList.add('hidden');
+
+  if (isTopFive(score)) {
+    pendingNewEntry = { score, lines: lines, combo: sessionBestCombo };
+    restartBtn.disabled = true;
+    nameInputWrap.classList.remove('hidden');
+    nameInput.value = '';
+    setTimeout(() => nameInput.focus(), 50);
+  } else {
+    renderOverlayHighscores(-1);
+  }
+
   overlay.classList.remove('hidden');
 }
+
+function saveNameAndShowTable() {
+  if (!pendingNewEntry) return;
+  const name = nameInput.value.trim() || 'AAA';
+  const idx = insertScore(name, pendingNewEntry.score, pendingNewEntry.lines, pendingNewEntry.combo);
+  pendingNewEntry = null;
+  restartBtn.disabled = false;
+  nameInputWrap.classList.add('hidden');
+  renderOverlayHighscores(idx);
+  renderSideHighscores();
+}
+
+nameSaveBtn.addEventListener('click', saveNameAndShowTable);
+nameInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') saveNameAndShowTable();
+});
+
+resetHsBtn.addEventListener('click', () => {
+  localStorage.removeItem(HS_KEY);
+  localStorage.removeItem(STATS_KEY);
+  pendingNewEntry = null;
+  restartBtn.disabled = false;
+  nameInputWrap.classList.add('hidden');
+  renderSideHighscores();
+  if (!overlay.classList.contains('hidden') && gameOver) {
+    overlayHs.innerHTML = '';
+  }
+});
 
 function togglePause() {
   if (gameOver) return;
@@ -238,6 +412,8 @@ function togglePause() {
     cancelAnimationFrame(animId);
     overlayTitle.textContent = 'PAUSA';
     overlayScore.textContent = '';
+    overlayHs.innerHTML = '';
+    nameInputWrap.classList.add('hidden');
     overlay.classList.remove('hidden');
   }
 }
@@ -268,6 +444,8 @@ function init() {
   gameOver = false;
   dropInterval = 1000;
   dropAccum = 0;
+  sessionBestCombo = 0;
+  pendingNewEntry = null;
   lastTime = performance.now();
   next = randomPiece();
   spawn();
@@ -329,4 +507,5 @@ themeToggle.addEventListener('click', () => {
   localStorage.setItem('tetris-theme', isLight ? 'light' : 'dark');
 });
 
+renderSideHighscores();
 init();
